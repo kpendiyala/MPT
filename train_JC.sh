@@ -16,8 +16,8 @@ OUTPUT_VOL_DIR="${OUTPUT_PATH}"
 echo "args: $@"
 
 MODEL_NAME=$1
-if ! [[ "${MODEL_NAME}" =~ ^(MPT|AuxFreeMPT)$ ]]; then
-    echo "Invalid model ${MODEL_NAME}! Valid options: MPT, AuxFreeMPT"
+if ! [[ "${MODEL_NAME}" =~ ^(MPT|AuxFreeMPT|PairwiseMPT)$ ]]; then
+    echo "Invalid model ${MODEL_NAME}! Valid options: MPT, AuxFreeMPT. PairwiseMPT."
     exit 1
 fi
 shift

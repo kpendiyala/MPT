@@ -4,11 +4,9 @@ import warnings
 import copy
 import torch
 import torch.nn as nn
-import torch.distributed as dist
 from functools import partial
-import logging
 
-_logger = logging.getLogger(__name__)
+from weaver.utils.logger import _logger
 
 
 @torch.jit.script
@@ -48,7 +46,7 @@ def to_ptrapphim(x, return_mass=True, eps=1e-8, for_onnx=False):
     px, py, pz, energy = x.split((1, 1, 1, 1), dim=1)
     pt = torch.sqrt(to_pt2(x, eps=eps))
     # rapidity = 0.5 * torch.log((energy + pz) / (energy - pz))
-    rapidity = (0.5 * torch.log(1 + (2 * pz) / (energy - pz).clamp(min=1e-20))).clamp(-10., 10.)
+    rapidity = 0.5 * torch.log(1 + (2 * pz) / (energy - pz).clamp(min=1e-20))
     phi = (atan2 if for_onnx else torch.atan2)(py, px)
     if not return_mass:
         return torch.cat((pt, rapidity, phi), dim=1)
@@ -374,9 +372,7 @@ class Block(nn.Module):
     def __init__(self, embed_dim=128, num_heads=8, ffn_ratio=4,
                  dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                  add_bias_kv=False, activation='gelu',
-                 scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True,
-                 moe_num_experts=4, moe_top_k=1,
-                 moe_capacity_factor=1.25, moe_bias_update_rate=0.001, moe_router_jitter=0.0):
+                 scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -395,57 +391,42 @@ class Block(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.pre_fc_norm = nn.LayerNorm(embed_dim)
+        self.fc1 = nn.Linear(embed_dim, self.ffn_dim)
         self.act = nn.GELU() if activation == 'gelu' else nn.ReLU()
         self.act_dropout = nn.Dropout(activation_dropout)
         self.post_fc_norm = nn.LayerNorm(self.ffn_dim) if scale_fc else None
-
-        if not (moe_num_experts and moe_num_experts > 0):
-            raise ValueError('moe_num_experts must be >= 1 for MoE-only Block')
-        
-        self.moe_num_experts = moe_num_experts
-        self.moe_top_k = moe_top_k
-        self.moe_capacity_factor = moe_capacity_factor
-        self.moe_router_jitter = moe_router_jitter
-        self.router = nn.Linear(embed_dim, moe_num_experts)
-        
-        experts = []
-        for _ in range(moe_num_experts):
-            experts.append(nn.Sequential(
-                nn.Linear(embed_dim, self.ffn_dim),
-                nn.GELU() if activation == 'gelu' else nn.ReLU(),
-                nn.Dropout(activation_dropout),
-                nn.LayerNorm(self.ffn_dim) if scale_fc else nn.Identity(),
-                nn.Linear(self.ffn_dim, embed_dim),
-            ))
-        self.experts = nn.ModuleList(experts)
-        
-        self.moe_bias_update_rate = moe_bias_update_rate 
-        self.register_buffer('expert_bias', torch.zeros(moe_num_experts), persistent=False)
+        self.fc2 = nn.Linear(self.ffn_dim, embed_dim)
 
         self.c_attn = nn.Parameter(torch.ones(num_heads), requires_grad=True) if scale_heads else None
         self.w_resid = nn.Parameter(torch.ones(embed_dim), requires_grad=True) if scale_resids else None
 
     def forward(self, x, x_cls=None, padding_mask=None, attn_mask=None):
+        """
+        Args:
+            x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
+            x_cls (Tensor, optional): class token input to the layer of shape `(1, batch, embed_dim)`
+            padding_mask (ByteTensor, optional): binary
+                ByteTensor of shape `(batch, seq_len)` where padding
+                elements are indicated by ``1``.
+
+        Returns:
+            encoded output of shape `(seq_len, batch, embed_dim)`
+        """
+
         if x_cls is not None:
             with torch.no_grad():
+                # prepend one element for x_cls: -> (batch, 1+seq_len)
                 padding_mask = torch.cat((torch.zeros_like(padding_mask[:, :1]), padding_mask), dim=1)
+            # class attention: https://arxiv.org/pdf/2103.17239.pdf
             residual = x_cls
-            u = torch.cat((x_cls, x), dim=0) 
+            u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
             u = self.pre_attn_norm(u)
-            x = self.attn(x_cls, u, u, key_padding_mask=padding_mask)[0] 
+            x = self.attn(x_cls, u, u, key_padding_mask=padding_mask)[0]  # (1, batch, embed_dim)
         else:
             residual = x
             x = self.pre_attn_norm(x)
-            kp_mask = padding_mask
-            if attn_mask is not None and kp_mask is not None:
-                if attn_mask.dtype.is_floating_point and not kp_mask.dtype.is_floating_point:
-                    kp_mask = kp_mask.to(attn_mask.dtype)
-                    neg_inf = torch.tensor(float('-inf'), dtype=kp_mask.dtype, device=kp_mask.device)
-                    zero = torch.tensor(0.0, dtype=kp_mask.dtype, device=kp_mask.device)
-                    kp_mask = torch.where(kp_mask > 0, neg_inf, zero)
-                elif (not attn_mask.dtype.is_floating_point) and kp_mask.dtype.is_floating_point:
-                    kp_mask = kp_mask.to(attn_mask.dtype)
-            x = self.attn(x, x, x, key_padding_mask=kp_mask, attn_mask=attn_mask)[0] 
+            x = self.attn(x, x, x, key_padding_mask=padding_mask,
+                          attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
 
         if self.c_attn is not None:
             tgt_len = x.size(0)
@@ -459,110 +440,11 @@ class Block(nn.Module):
 
         residual = x
         x = self.pre_fc_norm(x)
-        seq_len, batch_size, embed_dim = x.shape
-        tokens = x.reshape(seq_len * batch_size, embed_dim)
-
-        if padding_mask is not None and x_cls is None:
-            flat_padding_mask = padding_mask.transpose(0, 1).reshape(-1)
-            valid_mask = ~flat_padding_mask
-        else:
-            valid_mask = torch.ones(tokens.size(0), dtype=torch.bool, device=tokens.device)
-
-
-        router_logits = self.router(tokens)
-        if self.training and self.moe_router_jitter > 0:
-            noise = torch.empty_like(router_logits).uniform_(0, 1)
-            noise = -torch.log(-torch.log(noise.clamp(min=1e-9)))
-            router_logits = router_logits + self.moe_router_jitter * noise
-        
-        gates = torch.sigmoid(router_logits)
-        biased_gates = gates + self.expert_bias
-
-        output_tokens = torch.zeros_like(tokens)
-        
-        if self.moe_top_k == 1:
-            top1_idx = biased_gates.argmax(dim=-1)
-            top1_w = gates.gather(1, top1_idx.unsqueeze(1)).squeeze(1)
-            
-            num_real_tokens = valid_mask.sum().item() if self.training else tokens.size(0)
-            capacity = int(self.moe_capacity_factor * math.ceil(num_real_tokens / max(1, self.moe_num_experts)))
-            
-            for e in range(self.moe_num_experts):
-                mask = (top1_idx == e) & valid_mask
-                if mask.any():
-                    idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
-                    if idx.numel() > capacity:
-                        sel = top1_w[idx].topk(capacity, sorted=False).indices
-                        idx = idx[sel]
-                    expert_in = tokens.index_select(0, idx)
-                    expert_out = self.experts[e](expert_in)
-                    expert_w = top1_w.index_select(0, idx).unsqueeze(1)
-                    expert_out = expert_out * expert_w
-                    expert_out = expert_out.to(output_tokens.dtype)
-                    output_tokens.index_copy_(0, idx, expert_out)
-            
-            if self.training:
-                with torch.no_grad():
-                    valid_top1_idx = top1_idx[valid_mask]
-                    token_counts = torch.bincount(valid_top1_idx, minlength=self.moe_num_experts).float()
-                    
-                    # Sync counts across GPUs
-                    if dist.is_available() and dist.is_initialized():
-                        dist.all_reduce(token_counts, op=dist.ReduceOp.SUM)
-
-                    expected_load = token_counts.sum() / self.moe_num_experts
-                    violation_error = expected_load - token_counts
-                    
-                    self.expert_bias += self.moe_bias_update_rate * torch.sign(violation_error)
-
-        else:
-            # --- TOP-K ROUTING ---
-            k = min(self.moe_top_k, self.moe_num_experts)
-            
-            _, topk_idx = biased_gates.topk(k=k, dim=-1)
-            topk_vals = gates.gather(1, topk_idx) 
-            
-            denom = topk_vals.sum(dim=1, keepdim=True).clamp(min=1e-9)
-            topk_w = topk_vals / denom
-            
-            num_real_tokens = valid_mask.sum().item() if self.training else tokens.size(0)
-            capacity = int(self.moe_capacity_factor * math.ceil((num_real_tokens * k) / max(1, self.moe_num_experts)))
-            
-            for e in range(self.moe_num_experts):
-                mask_e = (topk_idx == e) & valid_mask.unsqueeze(1)
-                if mask_e.any():
-                    rows, cols = torch.nonzero(mask_e, as_tuple=True)
-                    if rows.numel() > capacity:
-                        weights_e = topk_w[rows, cols]
-                        sel = weights_e.topk(capacity, sorted=False).indices
-                        rows = rows.index_select(0, sel)
-                        cols = cols.index_select(0, sel)
-                        weights_e = weights_e.index_select(0, sel)
-                    else:
-                        weights_e = topk_w[rows, cols]
-                    
-                    expert_in = tokens.index_select(0, rows)
-                    expert_out = self.experts[e](expert_in)
-                    expert_out = expert_out * weights_e.unsqueeze(1)
-                    expert_out = expert_out.to(output_tokens.dtype)
-                    output_tokens.index_add_(0, rows, expert_out)
-
-            if self.training:
-                with torch.no_grad():
-                    valid_topk_idx = topk_idx[valid_mask]
-                    assigned_counts = torch.zeros(self.moe_num_experts, device=tokens.device)
-                    assigned_counts.scatter_add_(0, valid_topk_idx.flatten(), torch.ones_like(valid_topk_idx.flatten(), dtype=torch.float))
-                    
-                    # Sync counts across GPUs
-                    if dist.is_available() and dist.is_initialized():
-                        dist.all_reduce(assigned_counts, op=dist.ReduceOp.SUM)
-
-                    expected_load = assigned_counts.sum() / self.moe_num_experts
-                    violation_error = expected_load - assigned_counts
-                    
-                    self.expert_bias += self.moe_bias_update_rate * torch.sign(violation_error)
-
-        x = output_tokens.view(seq_len, batch_size, embed_dim)
+        x = self.act(self.fc1(x))
+        x = self.act_dropout(x)
+        if self.post_fc_norm is not None:
+            x = self.post_fc_norm(x)
+        x = self.fc2(x)
         x = self.dropout(x)
         if self.w_resid is not None:
             residual = torch.mul(self.w_resid, residual)
@@ -571,7 +453,7 @@ class Block(nn.Module):
         return x
 
 
-class AuxFreeMoeParticleTransformer(nn.Module):
+class PairwiseMoEParticleTransformer(nn.Module):
 
     def __init__(self,
                  input_dim,
@@ -595,14 +477,7 @@ class AuxFreeMoeParticleTransformer(nn.Module):
                  trim=True,
                  for_inference=False,
                  use_amp=False,
-                 moe_num_experts=4,
-                 moe_top_k=1,
-                 moe_layers=None,
-                 moe_capacity_factor=1.25,
-                 moe_bias_update_rate=0.001,
-                 moe_router_jitter=0.0,
-                 **kwargs
-                 ) -> None:
+                 **kwargs) -> None:
         super().__init__(**kwargs)
 
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
@@ -626,40 +501,13 @@ class AuxFreeMoeParticleTransformer(nn.Module):
         _logger.info('cfg_cls_block: %s' % str(cfg_cls_block))
 
         self.pair_extra_dim = pair_extra_dim
-        self.moe_num_experts = moe_num_experts
-        self.moe_top_k = moe_top_k
-        self.moe_layers = set(moe_layers) if moe_layers is not None else set()
-        self.moe_capacity_factor = moe_capacity_factor
-        self.moe_bias_update_rate = moe_bias_update_rate
-        self.moe_router_jitter = moe_router_jitter
-        if not (self.moe_num_experts and self.moe_num_experts > 0):
-            raise ValueError('moe_num_experts must be >= 1 for MoE-only MoeParticleTransformer')
         self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
         self.pair_embed = PairEmbed(
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
             for_onnx=for_inference) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
-        blocks = []
-        for _ in range(num_layers):
-            blocks.append(Block(
-                **cfg_block,
-                moe_num_experts=self.moe_num_experts,
-                moe_top_k=self.moe_top_k,
-                moe_capacity_factor=self.moe_capacity_factor,
-                moe_bias_update_rate=self.moe_bias_update_rate,
-                moe_router_jitter=self.moe_router_jitter,
-            ))
-        self.blocks = nn.ModuleList(blocks)
-        self.cls_blocks = nn.ModuleList([
-            Block(
-                **cfg_cls_block,
-                moe_num_experts=self.moe_num_experts,
-                moe_top_k=self.moe_top_k,
-                moe_capacity_factor=self.moe_capacity_factor,
-                moe_bias_update_rate=self.moe_bias_update_rate,
-                moe_router_jitter=self.moe_router_jitter,
-            ) for _ in range(num_cls_layers)
-        ])
+        self.blocks = nn.ModuleList([Block(**cfg_block) for _ in range(num_layers)])
+        self.cls_blocks = nn.ModuleList([Block(**cfg_cls_block) for _ in range(num_cls_layers)])
         self.norm = nn.LayerNorm(embed_dim)
 
         if fc_params is not None:
@@ -695,17 +543,65 @@ class AuxFreeMoeParticleTransformer(nn.Module):
             x, v, mask, uu = self.trimmer(x, v, mask, uu)
             padding_mask = ~mask.squeeze(1)  # (N, P)
 
-        with torch.amp.autocast('cuda', enabled=self.use_amp):
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
             # input embedding
             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
-            attn_mask = None
+            base_attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
-                attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
+                base_attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
 
-            # transform
-            for block in self.blocks:
-                x = block(x, x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
-  
+            if v is not None:
+                seq_len = v.size(-1)
+                xi = v.unsqueeze(-1).expand(-1, -1, -1, seq_len)
+                xj = v.unsqueeze(-2).expand(-1, -1, seq_len, -1)
+                raw_physics = pairwise_lv_fts(xi, xj, num_outputs=4)
+                ln_delta_r = raw_physics[:, 2, :, :]
+
+            with torch.no_grad():
+                real_nodes = mask.squeeze(1).bool()  # (Batch, P)
+                real_2d_mask = real_nodes.unsqueeze(-1) & real_nodes.unsqueeze(-2) # (Batch, P, P)
+                total_real_pairs = real_2d_mask.sum().float().clamp(min=1.0)
+            
+            self._current_sparsities = {}
+
+            threshold_schedule = [
+                (0.0, 0.1),  # Layer 0: Immediate collinear splittings
+                (0.05, 0.2), # Layer 1: Expanding micro-physics
+                (0.1, 0.4),  # Layer 2: Sub-subjet structures
+                (0.2, 0.6),  # Layer 3: Subjet clustering
+                (0.4, 0.8),  # Layer 4: Inter-subjet routing (radius scale)
+                (0.6, 1.2),  # Layer 5: Global topology (cross-jet)
+                (0.8, 1.6),  # Layer 6: Extreme global / opposite edges
+                (0.8, 99.0)  # Layer 7: Safety catch-all for boundary pairs
+            ]
+
+            for i, block in enumerate(self.blocks):
+                layer_attn_mask = base_attn_mask
+
+                if base_attn_mask is not None and v is not None:
+                    if i < len(threshold_schedule):
+                        min_thresh, max_thresh = threshold_schedule[i]
+                    else:
+                        min_thresh, max_thresh = (0.0, 99.0)
+                    
+                    ln_min = math.log(min_thresh) if min_thresh > 0 else -math.inf
+                    ln_max = math.log(max_thresh)
+                    
+                    valid_mask = (ln_delta_r > ln_min) & (ln_delta_r < ln_max)
+
+                    with torch.no_grad():
+                        active_real_pairs = valid_mask & real_2d_mask
+                        fraction_active = (active_real_pairs.sum().float() / total_real_pairs).item()
+                        self._current_sparsities[f'layer_{i}_active_fraction'] = fraction_active
+                    
+                    valid_mask = valid_mask.repeat_interleave(block.num_heads, dim=0)
+                    
+                    u_active_band = base_attn_mask.masked_fill(~valid_mask, 0.0)
+                    
+                    layer_attn_mask = base_attn_mask + u_active_band
+
+                x = block(x, x_cls=None, padding_mask=padding_mask, attn_mask=layer_attn_mask)
+
             # extract class token
             cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
             for block in self.cls_blocks:
@@ -723,7 +619,7 @@ class AuxFreeMoeParticleTransformer(nn.Module):
             return output
 
 
-class MoeParticleTransformerTagger(nn.Module):
+class ParticleTransformerTagger(nn.Module):
 
     def __init__(self,
                  pf_input_dim,
@@ -758,7 +654,7 @@ class MoeParticleTransformerTagger(nn.Module):
         self.pf_embed = Embed(pf_input_dim, embed_dims, activation=activation)
         self.sv_embed = Embed(sv_input_dim, embed_dims, activation=activation)
 
-        self.part = AuxFreeMoeParticleTransformer(input_dim=embed_dims[-1],
+        self.part = PairwiseMoEParticleTransformer(input_dim=embed_dims[-1],
                                         num_classes=num_classes,
                                         # network configurations
                                         pair_input_dim=pair_input_dim,
@@ -794,7 +690,7 @@ class MoeParticleTransformerTagger(nn.Module):
             v = torch.cat([pf_v, sv_v], dim=2)
             mask = torch.cat([pf_mask, sv_mask], dim=2)
 
-        with torch.amp.autocast('cuda', enabled=self.use_amp):
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
             pf_x = self.pf_embed(pf_x)  # after embed: (seq_len, batch, embed_dim)
             sv_x = self.sv_embed(sv_x)
             x = torch.cat([pf_x, sv_x], dim=0)
@@ -802,7 +698,7 @@ class MoeParticleTransformerTagger(nn.Module):
             return self.part(x, v, mask)
 
 
-class MoeParticleTransformerTaggerWithExtraPairFeatures(nn.Module):
+class ParticleTransformerTaggerWithExtraPairFeatures(nn.Module):
 
     def __init__(self,
                  pf_input_dim,
@@ -838,7 +734,7 @@ class MoeParticleTransformerTaggerWithExtraPairFeatures(nn.Module):
         self.pf_embed = Embed(pf_input_dim, embed_dims, activation=activation)
         self.sv_embed = Embed(sv_input_dim, embed_dims, activation=activation)
 
-        self.part = AuxFreeMoeParticleTransformer(input_dim=embed_dims[-1],
+        self.part = PairwiseMoEParticleTransformer(input_dim=embed_dims[-1],
                                         num_classes=num_classes,
                                         # network configurations
                                         pair_input_dim=pair_input_dim,
@@ -880,7 +776,7 @@ class MoeParticleTransformerTaggerWithExtraPairFeatures(nn.Module):
             uu = torch.zeros(v.size(0), pf_uu.size(1), v.size(2), v.size(2), dtype=v.dtype, device=v.device)
             uu[:, :, :pf_x.size(2), :pf_x.size(2)] = pf_uu
 
-        with torch.amp.autocast('cuda', enabled=self.use_amp):
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
             pf_x = self.pf_embed(pf_x)  # after embed: (seq_len, batch, embed_dim)
             sv_x = self.sv_embed(sv_x)
             x = torch.cat([pf_x, sv_x], dim=0)

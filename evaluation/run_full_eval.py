@@ -7,9 +7,10 @@ import numpy as np
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from model.MoETransformer import MoeParticleTransformer 
+from model.AuxFreeMoETransformer import AuxFreeMoeParticleTransformer 
 
 from evaluation.data_loader import get_train_loader, get_test_loader
+from evaluation.interpretability import InterpretabilityEvaluator
 from evaluation.embedding_eval import EmbeddingEvaluator
 from evaluation.profiler import ModelProfiler
 
@@ -26,7 +27,7 @@ def prepare_inputs(batch_data, device):
 def load_wrapped_model(checkpoint_path, model_config, device):
     print(f"Loading wrapped model from {checkpoint_path}")
     
-    model = MoeParticleTransformer(**model_config)
+    model = AuxFreeMoeParticleTransformer(**model_config)
     
     state_dict = torch.load(checkpoint_path, map_location=device)
     
@@ -47,8 +48,9 @@ def main():
     parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--gpu', type=int, default=0)
     
-    parser.add_argument('--num_experts', type=int, default=4)
-    parser.add_argument('--top_k', type=int, default=1)
+    parser.add_argument('--ffn_ratio', type=int, default=2)
+    parser.add_argument('--num_experts', type=int, default=8)
+    parser.add_argument('--top_k', type=int, default=2)
     args = parser.parse_args()
 
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
@@ -68,16 +70,17 @@ def main():
         num_heads=8,
         num_layers=8,
         num_cls_layers=2,
+        ffn_ratio=args.ffn_ratio,
         block_params=None,
         cls_block_params={'dropout': 0, 'attn_dropout': 0, 'activation_dropout': 0},
         fc_params=[],
         activation='gelu',
         trim=True,
-        for_inference=False,
+        for_inference=True,
         moe_num_experts=args.num_experts,
         moe_top_k=args.top_k,
-        moe_capacity_factor=1.5,
-        moe_aux_loss_coef=0.01,
+        moe_capacity_factor=4,
+        moe_bias_update_rate=0.001,
         moe_router_jitter=0.01,
     )
 
@@ -86,38 +89,51 @@ def main():
     test_loader = get_test_loader(args.data_dir, args.dataset, batch_size=args.batch_size)
 
     print("\n" + "="*40)
-    print("COMPUTATIONAL PROFILING")
+    print("INTERPRETABILITY ANALYSIS")
     print("="*40)
-    
-    batch = next(iter(test_loader))
-    inputs_tuple = prepare_inputs(batch[0], device)
-    first_jet_tuple = tuple(t[0:1] for t in inputs_tuple)
-    
-    profiler = ModelProfiler(model, first_jet_tuple)
-    
-    results['compute'] = {
-        'params': profiler.count_params(),
-        'flops': profiler.count_flops(),
-        'latency': profiler.measure_latency()
-    }
-    
-    print(f"Active Params: {results['compute']['params']['active_params']}")
-    print(f"MACS: {results['compute']['flops']['total_flops']}")
-    print(f"Latency: {results['compute']['latency']['latency_ms']:.2f} ms")
 
-    print("\n" + "="*40)
-    print("REPRESENTATION QUALITY")
-    print("="*40)
+    interp_eval = InterpretabilityEvaluator(
+        model=model, 
+        device=device, 
+        layer_idx=0, 
+        input_adapter=prepare_inputs
+    )
+    interp_results = interp_eval.evaluate_all(test_loader)
+    interp_eval.plot_interpretability(interp_results, save_dir=args.save_dir)
+
+    # print("\n" + "="*40)
+    # print("COMPUTATIONAL PROFILING")
+    # print("="*40)
     
-    emb_eval = EmbeddingEvaluator(model, device=device, input_adapter=prepare_inputs)
-    emb_results = emb_eval.evaluate_all(train_loader, test_loader)
-    results['embedding'] = emb_results
+    # batch = next(iter(test_loader))
+    # inputs_tuple = prepare_inputs(batch[0], device)
+    # first_jet_tuple = tuple(t[0:1] for t in inputs_tuple)
+    
+    # profiler = ModelProfiler(model, first_jet_tuple)
+    
+    # results['compute'] = {
+    #     'params': profiler.count_params(),
+    #     'flops': profiler.count_flops(),
+    #     'latency': profiler.measure_latency()
+    # }
+    
+    # print(f"Active Params: {results['compute']['params']['active_params']}")
+    # print(f"MACS: {results['compute']['flops']['total_flops']}")
+    # print(f"Latency: {results['compute']['latency']['latency_ms']:.2f} ms")
 
-    with open(os.path.join(args.save_dir, 'full_report.json'), 'w') as f:
-        def convert(o): return float(o) if isinstance(o, (np.float32, np.float64)) else str(o)
-        json.dump(results, f, indent=4, default=convert)
+    # print("\n" + "="*40)
+    # print("REPRESENTATION QUALITY")
+    # print("="*40)
+    
+    # emb_eval = EmbeddingEvaluator(model, device=device, input_adapter=prepare_inputs)
+    # emb_results = emb_eval.evaluate_all(train_loader, test_loader)
+    # results['embedding'] = emb_results
 
-    print(f"\nFull evaluation complete. Results saved to {args.save_dir}")
+    # with open(os.path.join(args.save_dir, 'full_report.json'), 'w') as f:
+    #     def convert(o): return float(o) if isinstance(o, (np.float32, np.float64)) else str(o)
+    #     json.dump(results, f, indent=4, default=convert)
+
+    # print(f"\nFull evaluation complete. Results saved to {args.save_dir}")
 
 if __name__ == "__main__":
     main()
