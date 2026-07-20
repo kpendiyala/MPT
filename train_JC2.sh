@@ -68,6 +68,8 @@ EPOCHS=2
 NUM_WORKERS=2
 BATCH_SIZE=512
 START_LR="5e-4"
+SAMPLES_PER_EPOCH=""
+SAMPLES_PER_EPOCH_VAL=""
 
 WEAVER_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -98,6 +100,10 @@ while [[ $# -gt 0 ]]; do
             BATCH_SIZE="$2"; shift 2 ;;
         --start-lr)
             START_LR="$2"; shift 2 ;;
+        --samples-per-epoch)
+            SAMPLES_PER_EPOCH="$2"; shift 2 ;;
+        --samples-per-epoch-val)
+            SAMPLES_PER_EPOCH_VAL="$2"; shift 2 ;;
         --dry-run)
             DRY_RUN=1; shift ;;
         # Backward-compatible alias from the old JetClass script.
@@ -131,6 +137,15 @@ if (( SMOKE_TEST == 1 )); then
     # Keep smoke tests short and cheap.
     samples_per_epoch=$((20 * 1024 / NGPUS))
     samples_per_epoch_val=$((10 * 1024))
+fi
+
+# Optional explicit limits for pilot runs.
+if [[ -n "${SAMPLES_PER_EPOCH}" ]]; then
+    samples_per_epoch=$((SAMPLES_PER_EPOCH / NGPUS))
+fi
+
+if [[ -n "${SAMPLES_PER_EPOCH_VAL}" ]]; then
+    samples_per_epoch_val="${SAMPLES_PER_EPOCH_VAL}"
 fi
 
 DATACONFIG="data/JetClassII/JetClassII_full.yaml"
@@ -272,6 +287,12 @@ echo "TRAIN_FILES=${#train_files[@]}"
 echo "VAL_FILES=${#val_files[@]}"
 echo "DATACONFIG=${DATACONFIG}"
 echo "NETWORK_CONFIG=${NETWORK_CONFIG}"
+echo "BATCH_SIZE=${BATCH_SIZE}"
+echo "NUM_WORKERS=${NUM_WORKERS}"
+echo "SAMPLES_PER_EPOCH=${samples_per_epoch}"
+echo "SAMPLES_PER_EPOCH_VAL=${samples_per_epoch_val}"
+echo "TRAIN_STEPS_APPROX=$(((samples_per_epoch + BATCH_SIZE - 1) / BATCH_SIZE))"
+echo "VAL_STEPS_APPROX=$(((samples_per_epoch_val + BATCH_SIZE - 1) / BATCH_SIZE))"
 
 if [[ "${MODE}" == "make_weight" ]]; then
     FINAL_CMD=(
