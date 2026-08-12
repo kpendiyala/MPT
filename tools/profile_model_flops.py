@@ -80,6 +80,23 @@ def count_params(model):
     )
     return total, trainable
 
+def disable_sdpa_for_flops(model):
+    """
+    Force Weaver's custom Attention modules to use the explicit
+    matmul attention implementation so torch.profiler can count
+    attention FLOPs.
+
+    This is for FLOPs measurement only. It does not change the
+    mathematical architecture.
+    """
+    changed = 0
+
+    for module in model.modules():
+        if hasattr(module, "use_sdpa"):
+            module.use_sdpa = False
+            changed += 1
+
+    return changed
 
 def build_dense(data_config):
     model, _ = ParT.get_model(
@@ -288,10 +305,19 @@ def main():
     results = []
 
     # Dense baseline
+    dense_model = build_dense(data_config)
+    
+    num_changed = disable_sdpa_for_flops(dense_model)
+    
+    print(
+        f"Disabled SDPA in {num_changed} "
+        "Dense ParT attention modules for FLOPs profiling."
+    )
+    
     results.append(
         profile_model(
             "Dense ParT",
-            build_dense(data_config),
+            dense_model,
             inputs,
             device,
             output_dir,
