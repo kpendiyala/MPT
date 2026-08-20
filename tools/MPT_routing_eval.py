@@ -1,22 +1,15 @@
 import os
 
-from model.MPT import (
-    get_model as _get_model,
-    get_loss,
-)
+from model.MPT import get_model as _get_model
+from model.MPT import get_loss
 
-from tools.routing_collector import (
-    RoutingCollector,
-)
+from tools.routing_collector import RoutingCollector
 
 
 _COLLECTOR = None
 
 
-def get_model(
-    data_config,
-    **kwargs,
-):
+def get_model(data_config, **kwargs):
     global _COLLECTOR
 
     model, model_info = _get_model(
@@ -34,8 +27,7 @@ def get_model(
 
     if not output_dir:
         raise RuntimeError(
-            "ROUTING_OUTPUT_DIR environment "
-            "variable is required."
+            "ROUTING_OUTPUT_DIR is required"
         )
 
     _COLLECTOR = RoutingCollector(
