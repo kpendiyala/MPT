@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kaushik-moe-shell
+  namespace: cms-ml
+spec:
+  restartPolicy: Never
+  containers:
+    - name: shell
+      image: gitlab-registry.nrp-nautilus.io/hzia/pytorch-weaver:v2.5
+      workingDir: /kaushik-moe-vol
+      command: ["/bin/bash", "-lc", "sleep infinity"]
+      env:
+        - name: PYTHONPATH
+          value: "/kaushik-moe-vol/code/MPT"
+        - name: DATA_PATH
+          value: "/kaushik-moe-vol/data"
+        - name: OUTPUT_PATH
+          value: "/kaushik-moe-vol/outputs"
+        - name: WANDB_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: kaushik-wandb-secret
+              key: WANDB_API_KEY
+      volumeMounts:
+        - name: work
+          mountPath: /kaushik-moe-vol
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "2"
+          memory: 8Gi
+  volumes:
+    - name: work
+      persistentVolumeClaim:
+        claimName: kaushik-moe-vol
