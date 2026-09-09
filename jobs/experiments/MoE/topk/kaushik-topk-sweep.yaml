@@ -1,0 +1,474 @@
+apiVersion: v1
+kind: List
+
+items:
+
+  # ============================================================
+  # E4 K2 CAP2
+  # ============================================================
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: kaushik-topk-e4-k2-cap2
+      namespace: cms-ml
+
+    spec:
+      backoffLimit: 0
+
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values:
+                          - uicnrp-fiona2.evl.uic.edu
+
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-A40
+                          - NVIDIA-GeForce-RTX-3090
+                          - NVIDIA-GeForce-RTX-4090
+                          - NVIDIA-A10
+                          - NVIDIA-TITAN-RTX
+                          - NVIDIA-RTX-A5000
+                          - Quadro-RTX-6000
+                          - NVIDIA-L40
+
+          restartPolicy: Never
+
+          containers:
+            - name: train
+              image: gitlab-registry.nrp-nautilus.io/hzia/pytorch-weaver:v2.5
+              command: ["/bin/bash", "-lc"]
+
+              args:
+                - |
+                  set -euo pipefail
+
+                  cd /kaushik-moe-vol/code/MPT
+
+                  RUN_GROUP="topk-sweep"
+                  RUN_NAME="e4-k2-cap2"
+                  COMMENT="topk-e4-k2-cap2"
+
+                  RUN_DIR="/kaushik-moe-vol/outputs/runs/${RUN_GROUP}/${RUN_NAME}"
+
+                  mkdir -p \
+                    "${RUN_DIR}/config" \
+                    "${RUN_DIR}/profiling" \
+                    "${RUN_DIR}/logs" \
+                    "${RUN_DIR}/metrics" \
+                    "${RUN_DIR}/routing" \
+                    "${RUN_DIR}/metadata"
+
+                  cat > "${RUN_DIR}/metadata/run_identity.txt" <<EOF
+                  run_group=${RUN_GROUP}
+                  run_name=${RUN_NAME}
+                  comment=${COMMENT}
+                  model=MPT
+                  experts=4
+                  top_k=2
+                  capacity_factor=2
+                  aux_loss_coef=0.01
+                  router_jitter=0.01
+                  EOF
+
+                  git rev-parse HEAD \
+                    > "${RUN_DIR}/metadata/git_commit.txt" \
+                    2>/dev/null || true
+
+                  nvidia-smi \
+                    --query-gpu=name,memory.total,driver_version \
+                    --format=csv,noheader \
+                    > "${RUN_DIR}/metadata/gpu.txt"
+
+                  python3 tools/patch_weaver_progress.py
+                  python3 tools/patch_weaver_eval.py
+
+                  echo "Profiling E4 K2 cap2"
+
+                  python3 tools/profile_run_flops.py \
+                    --model MPT \
+                    --run-name "${RUN_NAME}" \
+                    --num-experts 4 \
+                    --top-k 2 \
+                    --capacity-factor 2 \
+                    --aux-loss-coef 0.01 \
+                    --router-jitter 0.01 \
+                    --batch-size 1 \
+                    --seq-len 128 \
+                    --device cuda \
+                    --output-dir "${RUN_DIR}/profiling"
+
+                  echo "Training E4 K2 cap2"
+
+                  script -q -e -c \
+                    "./train_JC2.sh MPT full \
+                      --train-files-per-group 10 \
+                      --val-files-per-group 2 \
+                      --num-epochs 20 \
+                      --num-workers 2 \
+                      --batch-size 512 \
+                      --start-lr 5e-4 \
+                      --samples-per-epoch 1000000 \
+                      --samples-per-epoch-val 600000 \
+                      --network-option moe_num_experts 4 \
+                      --network-option moe_top_k 2 \
+                      --network-option moe_capacity_factor 2 \
+                      --network-option moe_aux_loss_coef 0.01 \
+                      --network-option moe_router_jitter 0.01" \
+                    /dev/null | stdbuf -o0 tr '\r' '\n'
+
+                  python3 tools/extract_run_metrics.py \
+                    --log "/kaushik-moe-vol/outputs/logs/MPT/JetClassII_Pythia_full_MPT_${COMMENT}.log" \
+                    --output-dir "${RUN_DIR}"
+
+                  echo "E4 K2 cap2 complete."
+
+              env:
+                - name: PYTHONPATH
+                  value: "/kaushik-moe-vol/code/MPT"
+                - name: DATA_PATH
+                  value: "/kaushik-moe-vol/data"
+                - name: OUTPUT_PATH
+                  value: "/kaushik-moe-vol/outputs"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+
+              volumeMounts:
+                - name: work
+                  mountPath: /kaushik-moe-vol
+
+              resources:
+                requests:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "32Gi"
+                limits:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "32Gi"
+
+          volumes:
+            - name: work
+              persistentVolumeClaim:
+                claimName: kaushik-moe-vol
+
+
+  # ============================================================
+  # E8 K2 CAP4
+  # ============================================================
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: kaushik-topk-e8-k2-cap4
+      namespace: cms-ml
+
+    spec:
+      backoffLimit: 0
+
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values:
+                          - uicnrp-fiona2.evl.uic.edu
+
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-A40
+                          - NVIDIA-GeForce-RTX-3090
+                          - NVIDIA-GeForce-RTX-4090
+                          - NVIDIA-A10
+                          - NVIDIA-TITAN-RTX
+                          - NVIDIA-RTX-A5000
+                          - Quadro-RTX-6000
+                          - NVIDIA-L40
+
+          restartPolicy: Never
+
+          containers:
+            - name: train
+              image: gitlab-registry.nrp-nautilus.io/hzia/pytorch-weaver:v2.5
+              command: ["/bin/bash", "-lc"]
+
+              args:
+                - |
+                  set -euo pipefail
+
+                  cd /kaushik-moe-vol/code/MPT
+
+                  RUN_GROUP="topk-sweep"
+                  RUN_NAME="e8-k2-cap4"
+                  COMMENT="topk-e8-k2-cap4"
+
+                  RUN_DIR="/kaushik-moe-vol/outputs/runs/${RUN_GROUP}/${RUN_NAME}"
+
+                  mkdir -p \
+                    "${RUN_DIR}/config" \
+                    "${RUN_DIR}/profiling" \
+                    "${RUN_DIR}/logs" \
+                    "${RUN_DIR}/metrics" \
+                    "${RUN_DIR}/routing" \
+                    "${RUN_DIR}/metadata"
+
+                  cat > "${RUN_DIR}/metadata/run_identity.txt" <<EOF
+                  run_group=${RUN_GROUP}
+                  run_name=${RUN_NAME}
+                  comment=${COMMENT}
+                  model=MPT
+                  experts=8
+                  top_k=2
+                  capacity_factor=4
+                  aux_loss_coef=0.01
+                  router_jitter=0.01
+                  EOF
+
+                  git rev-parse HEAD \
+                    > "${RUN_DIR}/metadata/git_commit.txt" \
+                    2>/dev/null || true
+
+                  nvidia-smi \
+                    --query-gpu=name,memory.total,driver_version \
+                    --format=csv,noheader \
+                    > "${RUN_DIR}/metadata/gpu.txt"
+
+                  python3 tools/patch_weaver_progress.py
+                  python3 tools/patch_weaver_eval.py
+
+                  echo "Profiling E8 K2 cap4"
+
+                  python3 tools/profile_run_flops.py \
+                    --model MPT \
+                    --run-name "${RUN_NAME}" \
+                    --num-experts 8 \
+                    --top-k 2 \
+                    --capacity-factor 4 \
+                    --aux-loss-coef 0.01 \
+                    --router-jitter 0.01 \
+                    --batch-size 1 \
+                    --seq-len 128 \
+                    --device cuda \
+                    --output-dir "${RUN_DIR}/profiling"
+
+                  echo "Training E8 K2 cap4"
+
+                  script -q -e -c \
+                    "./train_JC2.sh MPT full \
+                      --train-files-per-group 10 \
+                      --val-files-per-group 2 \
+                      --num-epochs 20 \
+                      --num-workers 2 \
+                      --batch-size 512 \
+                      --start-lr 5e-4 \
+                      --samples-per-epoch 1000000 \
+                      --samples-per-epoch-val 600000 \
+                      --network-option moe_num_experts 8 \
+                      --network-option moe_top_k 2 \
+                      --network-option moe_capacity_factor 4 \
+                      --network-option moe_aux_loss_coef 0.01 \
+                      --network-option moe_router_jitter 0.01" \
+                    /dev/null | stdbuf -o0 tr '\r' '\n'
+
+                  python3 tools/extract_run_metrics.py \
+                    --log "/kaushik-moe-vol/outputs/logs/MPT/JetClassII_Pythia_full_MPT_${COMMENT}.log" \
+                    --output-dir "${RUN_DIR}"
+
+                  echo "E8 K2 cap4 complete."
+
+              env:
+                - name: PYTHONPATH
+                  value: "/kaushik-moe-vol/code/MPT"
+                - name: DATA_PATH
+                  value: "/kaushik-moe-vol/data"
+                - name: OUTPUT_PATH
+                  value: "/kaushik-moe-vol/outputs"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+
+              volumeMounts:
+                - name: work
+                  mountPath: /kaushik-moe-vol
+
+              resources:
+                requests:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "32Gi"
+                limits:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "32Gi"
+
+          volumes:
+            - name: work
+              persistentVolumeClaim:
+                claimName: kaushik-moe-vol
+
+
+  # ============================================================
+  # E8 K4 CAP2
+  # ============================================================
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: kaushik-topk-e8-k4-cap2
+      namespace: cms-ml
+
+    spec:
+      backoffLimit: 0
+
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values:
+                          - uicnrp-fiona2.evl.uic.edu
+
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-A40
+                          - NVIDIA-GeForce-RTX-3090
+                          - NVIDIA-GeForce-RTX-4090
+                          - NVIDIA-A10
+                          - NVIDIA-TITAN-RTX
+                          - NVIDIA-RTX-A5000
+                          - Quadro-RTX-6000
+                          - NVIDIA-L40
+
+          restartPolicy: Never
+
+          containers:
+            - name: train
+              image: gitlab-registry.nrp-nautilus.io/hzia/pytorch-weaver:v2.5
+              command: ["/bin/bash", "-lc"]
+
+              args:
+                - |
+                  set -euo pipefail
+
+                  cd /kaushik-moe-vol/code/MPT
+
+                  RUN_GROUP="topk-sweep"
+                  RUN_NAME="e8-k4-cap2"
+                  COMMENT="topk-e8-k4-cap2"
+
+                  RUN_DIR="/kaushik-moe-vol/outputs/runs/${RUN_GROUP}/${RUN_NAME}"
+
+                  mkdir -p \
+                    "${RUN_DIR}/config" \
+                    "${RUN_DIR}/profiling" \
+                    "${RUN_DIR}/logs" \
+                    "${RUN_DIR}/metrics" \
+                    "${RUN_DIR}/routing" \
+                    "${RUN_DIR}/metadata"
+
+                  cat > "${RUN_DIR}/metadata/run_identity.txt" <<EOF
+                  run_group=${RUN_GROUP}
+                  run_name=${RUN_NAME}
+                  comment=${COMMENT}
+                  model=MPT
+                  experts=8
+                  top_k=4
+                  capacity_factor=2
+                  aux_loss_coef=0.01
+                  router_jitter=0.01
+                  EOF
+
+                  git rev-parse HEAD \
+                    > "${RUN_DIR}/metadata/git_commit.txt" \
+                    2>/dev/null || true
+
+                  nvidia-smi \
+                    --query-gpu=name,memory.total,driver_version \
+                    --format=csv,noheader \
+                    > "${RUN_DIR}/metadata/gpu.txt"
+
+                  python3 tools/patch_weaver_progress.py
+                  python3 tools/patch_weaver_eval.py
+
+                  echo "Profiling E8 K4 cap2"
+
+                  python3 tools/profile_run_flops.py \
+                    --model MPT \
+                    --run-name "${RUN_NAME}" \
+                    --num-experts 8 \
+                    --top-k 4 \
+                    --capacity-factor 2 \
+                    --aux-loss-coef 0.01 \
+                    --router-jitter 0.01 \
+                    --batch-size 1 \
+                    --seq-len 128 \
+                    --device cuda \
+                    --output-dir "${RUN_DIR}/profiling"
+
+                  echo "Training E8 K4 cap2"
+
+                  script -q -e -c \
+                    "./train_JC2.sh MPT full \
+                      --train-files-per-group 10 \
+                      --val-files-per-group 2 \
+                      --num-epochs 20 \
+                      --num-workers 2 \
+                      --batch-size 512 \
+                      --start-lr 5e-4 \
+                      --samples-per-epoch 1000000 \
+                      --samples-per-epoch-val 600000 \
+                      --network-option moe_num_experts 8 \
+                      --network-option moe_top_k 4 \
+                      --network-option moe_capacity_factor 2 \
+                      --network-option moe_aux_loss_coef 0.01 \
+                      --network-option moe_router_jitter 0.01" \
+                    /dev/null | stdbuf -o0 tr '\r' '\n'
+
+                  python3 tools/extract_run_metrics.py \
+                    --log "/kaushik-moe-vol/outputs/logs/MPT/JetClassII_Pythia_full_MPT_${COMMENT}.log" \
+                    --output-dir "${RUN_DIR}"
+
+                  echo "E8 K4 cap2 complete."
+
+              env:
+                - name: PYTHONPATH
+                  value: "/kaushik-moe-vol/code/MPT"
+                - name: DATA_PATH
+                  value: "/kaushik-moe-vol/data"
+                - name: OUTPUT_PATH
+                  value: "/kaushik-moe-vol/outputs"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+
+              volumeMounts:
+                - name: work
+                  mountPath: /kaushik-moe-vol
+
+              resources:
+                requests:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "32Gi"
+                limits:
+                  nvidia.com/gpu: 1
+                  cpu: "4"
+                  memory: "32Gi"
+
+          volumes:
+            - name: work
+              persistentVolumeClaim:
+                claimName: kaushik-moe-vol

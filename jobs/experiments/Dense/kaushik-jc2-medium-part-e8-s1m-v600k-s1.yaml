@@ -1,0 +1,146 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaushik-jc2-medium-part-e8-s1m-v600k-s1
+  namespace: cms-ml
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - uicnrp-fiona2.evl.uic.edu
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-A40
+                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-GeForce-RTX-4090
+                      - NVIDIA-A10
+                      - NVIDIA-TITAN-RTX
+                      - NVIDIA-RTX-A5000
+                      - Quadro-RTX-6000
+                      - NVIDIA-L40
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: gitlab-registry.nrp-nautilus.io/hzia/pytorch-weaver:v2.5
+          stdin: true
+          tty: true
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              cd /kaushik-moe-vol/code/MPT
+
+              # --------------------------------------------------
+              # Run organization
+              # --------------------------------------------------
+
+              RUN_DIR="/kaushik-moe-vol/outputs/runs/${COMMENT}"
+
+              mkdir -p "${RUN_DIR}/config"
+              mkdir -p "${RUN_DIR}/profiling"
+              mkdir -p "${RUN_DIR}/logs"
+              mkdir -p "${RUN_DIR}/metrics"
+              mkdir -p "${RUN_DIR}/routing"
+              mkdir -p "${RUN_DIR}/metadata"
+
+              # --------------------------------------------------
+              # Metadata
+              # --------------------------------------------------
+
+              git rev-parse HEAD \
+                > "${RUN_DIR}/metadata/git_commit.txt" \
+                2>/dev/null || true
+
+              nvidia-smi \
+                --query-gpu=name,memory.total,driver_version \
+                --format=csv,noheader \
+                > "${RUN_DIR}/metadata/gpu.txt"
+
+              python3 - <<'PY' > "${RUN_DIR}/metadata/environment.txt"
+              import sys
+              import torch
+
+              print("Python:", sys.version)
+              print("PyTorch:", torch.__version__)
+              print("CUDA available:", torch.cuda.is_available())
+
+              if torch.cuda.is_available():
+                  print("GPU:", torch.cuda.get_device_name(0))
+                  print("CUDA version:", torch.version.cuda)
+              PY
+
+              # --------------------------------------------------
+              # Weaver patches
+              # --------------------------------------------------
+
+              echo "Patching Weaver progress bars:"
+              python3 tools/patch_weaver_progress.py
+
+              echo "Disabling expensive per-epoch evaluation metrics"
+              python3 tools/patch_weaver_eval.py
+
+              # --------------------------------------------------
+              # FLOPs / parameter profiling
+              # --------------------------------------------------
+
+              echo "Running standardized FLOPs sanity profile..."
+              python3 tools/profile_run_flops.py \
+                --model ParT \
+                --run-name "${COMMENT}" \
+                --batch-size 1 \
+                --seq-len 128 \
+                --device cuda \
+                --output-dir "${RUN_DIR}/profiling"
+
+              echo "Starting medium dense ParT comparison run"
+
+              script -q -e -c \
+                "./train_JC2.sh ParT full \
+                  --train-files-per-group 10 \
+                  --val-files-per-group 2 \
+                  --num-epochs 8 \
+                  --num-workers 2 \
+                  --batch-size 512 \
+                  --start-lr 5e-4 \
+                  --samples-per-epoch 1000000 \
+                  --samples-per-epoch-val 600000" \
+                /dev/null | stdbuf -o0 tr '\r' '\n'
+          env:
+            - name: PYTHONPATH
+              value: "/kaushik-moe-vol/code/MPT"
+            - name: DATA_PATH
+              value: "/kaushik-moe-vol/data"
+            - name: OUTPUT_PATH
+              value: "/kaushik-moe-vol/outputs"
+            - name: COMMENT
+              value: "jc2-medium-part-e8-s1m-v600k-s1"
+            - name: DDP_NGPUS
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: work
+              mountPath: /kaushik-moe-vol
+          resources:
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "4"
+              memory: "32Gi"
+            limits:
+              nvidia.com/gpu: 1
+              cpu: "4"
+              memory: "32Gi"
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: kaushik-moe-vol

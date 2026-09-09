@@ -1,0 +1,206 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaushik-jc2-final-eval
+  namespace: cms-ml
+
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - uicnrp-fiona2.evl.uic.edu
+
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-A40
+                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-GeForce-RTX-4090
+                      - NVIDIA-A10
+                      - NVIDIA-TITAN-RTX
+                      - NVIDIA-RTX-A5000
+                      - Quadro-RTX-6000
+                      - NVIDIA-L40
+
+      restartPolicy: Never
+
+      containers:
+        - name: eval
+          image: gitlab-registry.nrp-nautilus.io/hzia/pytorch-weaver:v2.5
+
+          command: ["/bin/bash", "-lc"]
+
+          args:
+            - |
+              set -euo pipefail
+
+              cd /kaushik-moe-vol/code/MPT
+
+              echo "GPU:"
+              nvidia-smi
+
+              echo "Patching progress output only"
+              python3 tools/patch_weaver_progress.py
+
+              # IMPORTANT:
+              # DO NOT run patch_weaver_eval.py here.
+              # We WANT the expensive evaluation metrics enabled.
+
+              DATA_CONFIG="data/JetClassII/JetClassII_full.yaml"
+              DATA_DIR="/kaushik-moe-vol/data/JetClassII/Pythia"
+
+              VAL_RES2P_0="${DATA_DIR}/Res2P_0200.parquet"
+              VAL_RES2P_1="${DATA_DIR}/Res2P_0201.parquet"
+
+              VAL_RES34P_0="${DATA_DIR}/Res34P_0860.parquet"
+              VAL_RES34P_1="${DATA_DIR}/Res34P_0861.parquet"
+
+              VAL_QCD_0="${DATA_DIR}/QCD_0280.parquet"
+              VAL_QCD_1="${DATA_DIR}/QCD_0281.parquet"
+
+              evaluate_model () {
+
+                  NAME="$1"
+                  NETWORK_CONFIG="$2"
+                  CHECKPOINT="$3"
+                  OUTPUT_DIR="$4"
+                  shift 4
+
+                  mkdir -p "${OUTPUT_DIR}"
+
+                  echo
+                  echo "=================================================="
+                  echo "Evaluating ${NAME}"
+                  echo "Checkpoint: ${CHECKPOINT}"
+                  echo "=================================================="
+
+                  if [ ! -f "${CHECKPOINT}" ]; then
+                      echo "ERROR: checkpoint not found:"
+                      echo "${CHECKPOINT}"
+                      exit 1
+                  fi
+
+                  weaver \
+                    --predict \
+                    --data-test \
+                      "${VAL_RES2P_0}" \
+                      "${VAL_RES2P_1}" \
+                      "${VAL_RES34P_0}" \
+                      "${VAL_RES34P_1}" \
+                      "${VAL_QCD_0}" \
+                      "${VAL_QCD_1}" \
+                    --data-config "${DATA_CONFIG}" \
+                    --network-config "${NETWORK_CONFIG}" \
+                    --model-prefix "${CHECKPOINT}" \
+                    --batch-size 512 \
+                    --num-workers 2 \
+                    --fetch-step 1.0 \
+                    --use-amp \
+                    --amp-dtype bf16 \
+                    --gpus 0 \
+                    -o num_classes 188 \
+                    -o fc_params "[(512,0.1)]" \
+                    --predict-output "${OUTPUT_DIR}/pred.parquet" \
+                    "$@" \
+                    2>&1 | tee "${OUTPUT_DIR}/evaluation.log"
+              }
+
+              # --------------------------------------------------
+              # Dense ParT
+              # --------------------------------------------------
+
+              evaluate_model \
+                "Dense ParT" \
+                "model/ParT.py" \
+                "/kaushik-moe-vol/outputs/training/JetClassII/Pythia/full/ParT/jc2-medium-part-e8-s1m-v600k-s1/net_best_epoch_state.pt" \
+                "/kaushik-moe-vol/outputs/runs/jc2-medium-part-e8-s1m-v600k-s1/metrics/final_eval"
+
+              # --------------------------------------------------
+              # MPT E2 K1
+              # --------------------------------------------------
+
+              evaluate_model \
+                "MPT E2 K1" \
+                "model/MPT.py" \
+                "/kaushik-moe-vol/outputs/training/JetClassII/Pythia/full/MPT/jc2-medium-mpt-e2-k1-e8-s1m-v600k-s1/net_best_epoch_state.pt" \
+                "/kaushik-moe-vol/outputs/runs/jc2-medium-mpt-e2-k1-e8-s1m-v600k-s1/metrics/final_eval" \
+                --network-option moe_num_experts 2 \
+                --network-option moe_top_k 1 \
+                --network-option moe_capacity_factor 1.5 \
+                --network-option moe_aux_loss_coef 0.01 \
+                --network-option moe_router_jitter 0.01
+
+              # --------------------------------------------------
+              # MPT E4 K1
+              # --------------------------------------------------
+
+              evaluate_model \
+                "MPT E4 K1" \
+                "model/MPT.py" \
+                "/kaushik-moe-vol/outputs/training/JetClassII/Pythia/full/MPT/jc2-medium-mpt-e4-k1-e8-s1m-v600k-s1/net_best_epoch_state.pt" \
+                "/kaushik-moe-vol/outputs/runs/jc2-medium-mpt-e4-k1-e8-s1m-v600k-s1/metrics/final_eval" \
+                --network-option moe_num_experts 4 \
+                --network-option moe_top_k 1 \
+                --network-option moe_capacity_factor 1.5 \
+                --network-option moe_aux_loss_coef 0.01 \
+                --network-option moe_router_jitter 0.01
+
+              # --------------------------------------------------
+              # MPT E8 K1
+              # --------------------------------------------------
+
+              evaluate_model \
+                "MPT E8 K1" \
+                "model/MPT.py" \
+                "/kaushik-moe-vol/outputs/training/JetClassII/Pythia/full/MPT/jc2-medium-mpt-e8-k1-e8-s1m-v600k-s1/net_best_epoch_state.pt" \
+                "/kaushik-moe-vol/outputs/runs/jc2-medium-mpt-e8-k1-e8-s1m-v600k-s1/metrics/final_eval" \
+                --network-option moe_num_experts 8 \
+                --network-option moe_top_k 1 \
+                --network-option moe_capacity_factor 1.5 \
+                --network-option moe_aux_loss_coef 0.01 \
+                --network-option moe_router_jitter 0.01
+
+              echo
+              echo "All final evaluations completed."
+
+          env:
+            - name: PYTHONPATH
+              value: "/kaushik-moe-vol/code/MPT"
+
+            - name: DATA_PATH
+              value: "/kaushik-moe-vol/data"
+
+            - name: OUTPUT_PATH
+              value: "/kaushik-moe-vol/outputs"
+
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+          volumeMounts:
+            - name: work
+              mountPath: /kaushik-moe-vol
+
+          resources:
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "4"
+              memory: "32Gi"
+
+            limits:
+              nvidia.com/gpu: 1
+              cpu: "4"
+              memory: "32Gi"
+
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: kaushik-moe-vol
