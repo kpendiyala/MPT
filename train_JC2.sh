@@ -413,6 +413,26 @@ TRAIN_EXIT=0
 if [[ "${MODE}" == "train" && -n "${WANDB_API_KEY:-}" ]]; then
     echo "Logging clean TensorBoard metrics to W&B..."
 
+    if [[ ! -d "${TB_DIR}" ]]; then
+        echo "Expected TB_DIR not found: ${TB_DIR}"
+        echo "Searching for TensorBoard event file matching RUN_NAME=${RUN_NAME}..."
+
+        FOUND_EVENT_FILE="$(find "${OUTPUT_VOL_DIR}/tensorboard" \
+            -type f \
+            -name 'events.out.tfevents*' \
+            -path "*${RUN_NAME}*" \
+            -print \
+            | sort \
+            | tail -n 1 || true)"
+
+        if [[ -n "${FOUND_EVENT_FILE}" ]]; then
+            TB_DIR="$(dirname "${FOUND_EVENT_FILE}")"
+            echo "Found TensorBoard dir: ${TB_DIR}"
+        else
+            echo "Could not find TensorBoard event file for RUN_NAME=${RUN_NAME}"
+        fi
+    fi
+
     python3 tools/wandb_log_jc2_tensorboard.py \
         --tb-dir "${TB_DIR}" \
         --run-name "${RUN_NAME}" \
