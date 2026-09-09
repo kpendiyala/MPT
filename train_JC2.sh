@@ -159,7 +159,8 @@ mkdir -p \
     "${OUTPUT_VOL_DIR}/logs/${MODEL_NAME}" \
     "${OUTPUT_VOL_DIR}/tensorboard" \
     "${OUTPUT_VOL_DIR}/results/${MODEL_NAME}" \
-    "${OUTPUT_VOL_DIR}/experiments"
+    "${OUTPUT_VOL_DIR}/experiments" \
+    "${OUTPUT_VOL_DIR}/wandb"
 
 ln -sfn "${OUTPUT_VOL_DIR}/tensorboard" runs
 
@@ -277,6 +278,40 @@ MODEL_PREFIX="${OUTPUT_VOL_DIR}/training/JetClassII/Pythia/${FEATURE_TYPE}/${MOD
 LOG_FILE="${OUTPUT_VOL_DIR}/logs/${MODEL_NAME}/${RUN_NAME}.log"
 PRED_OUT="${OUTPUT_VOL_DIR}/results/${MODEL_NAME}/${RUN_NAME}/pred.root"
 
+# --------------------------------------------------
+# W&B / MoE metadata extraction
+# --------------------------------------------------
+
+MOE_NUM_EXPERTS=""
+MOE_TOP_K=""
+MOE_CAPACITY_FACTOR=""
+MOE_AUX_LOSS_COEF=""
+MOE_ROUTER_JITTER=""
+
+for ((i=0; i<${#WEAVER_ARGS[@]}; i++)); do
+    if [[ "${WEAVER_ARGS[$i]}" == "--network-option" ]]; then
+        key="${WEAVER_ARGS[$((i+1))]:-}"
+        value="${WEAVER_ARGS[$((i+2))]:-}"
+
+        case "${key}" in
+            moe_num_experts)
+                MOE_NUM_EXPERTS="${value}" ;;
+            moe_top_k)
+                MOE_TOP_K="${value}" ;;
+            moe_capacity_factor)
+                MOE_CAPACITY_FACTOR="${value}" ;;
+            moe_aux_loss_coef)
+                MOE_AUX_LOSS_COEF="${value}" ;;
+            moe_router_jitter)
+                MOE_ROUTER_JITTER="${value}" ;;
+        esac
+    fi
+done
+
+WEAVER_ARGS_TEXT="$(printf '%q ' "${WEAVER_ARGS[@]}")"
+TB_DIR="${OUTPUT_VOL_DIR}/tensorboard/${MODEL_NAME}/${RUN_NAME}"
+RUN_GROUP_FOR_WANDB="${WANDB_RUN_GROUP:-${MODEL_NAME}}"
+
 echo "MODE=${MODE}"
 echo "MODEL_NAME=${MODEL_NAME}"
 echo "FEATURE_TYPE=${FEATURE_TYPE}"
@@ -293,6 +328,16 @@ echo "SAMPLES_PER_EPOCH=${samples_per_epoch}"
 echo "SAMPLES_PER_EPOCH_VAL=${samples_per_epoch_val}"
 echo "TRAIN_STEPS_APPROX=$(((samples_per_epoch + BATCH_SIZE - 1) / BATCH_SIZE))"
 echo "VAL_STEPS_APPROX=$(((samples_per_epoch_val + BATCH_SIZE - 1) / BATCH_SIZE))"
+echo "MOE_NUM_EXPERTS=${MOE_NUM_EXPERTS}"
+echo "MOE_TOP_K=${MOE_TOP_K}"
+echo "MOE_CAPACITY_FACTOR=${MOE_CAPACITY_FACTOR}"
+echo "MOE_AUX_LOSS_COEF=${MOE_AUX_LOSS_COEF}"
+echo "MOE_ROUTER_JITTER=${MOE_ROUTER_JITTER}"
+echo "TB_DIR=${TB_DIR}"
+echo "WANDB_PROJECT=${WANDB_PROJECT:-}"
+echo "WANDB_ENTITY=${WANDB_ENTITY:-}"
+echo "WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-}"
+echo "WANDB_RUN_NAME=${WANDB_RUN_NAME:-}"
 
 if [[ "${MODE}" == "make_weight" ]]; then
     FINAL_CMD=(
@@ -362,4 +407,41 @@ if (( DRY_RUN == 1 )); then
     exit 0
 fi
 
-"${FINAL_CMD[@]}"
+TRAIN_EXIT=0
+"${FINAL_CMD[@]}" || TRAIN_EXIT=$?
+
+if [[ "${MODE}" == "train" && -n "${WANDB_API_KEY:-}" ]]; then
+    echo "Logging clean TensorBoard metrics to W&B..."
+
+    python3 tools/wandb_log_jc2_tensorboard.py \
+        --tb-dir "${TB_DIR}" \
+        --run-name "${RUN_NAME}" \
+        --run-group "${RUN_GROUP_FOR_WANDB}" \
+        --model-name "${MODEL_NAME}" \
+        --feature-type "${FEATURE_TYPE}" \
+        --comment "${suffix}" \
+        --epochs "${EPOCHS}" \
+        --batch-size "${BATCH_SIZE}" \
+        --start-lr "${START_LR}" \
+        --num-workers "${NUM_WORKERS}" \
+        --train-files "${#train_files[@]}" \
+        --val-files "${#val_files[@]}" \
+        --samples-per-epoch "${samples_per_epoch}" \
+        --samples-per-epoch-val "${samples_per_epoch_val}" \
+        --moe-num-experts "${MOE_NUM_EXPERTS}" \
+        --moe-top-k "${MOE_TOP_K}" \
+        --moe-capacity-factor "${MOE_CAPACITY_FACTOR}" \
+        --moe-aux-loss-coef "${MOE_AUX_LOSS_COEF}" \
+        --moe-router-jitter "${MOE_ROUTER_JITTER}" \
+        --weaver-args "${WEAVER_ARGS_TEXT}" \
+        --run-dir "/kaushik-moe-vol/outputs/runs/${WANDB_RUN_GROUP:-unknown}/${WANDB_RUN_NAME:-${suffix}}" \
+        --model-prefix "${MODEL_PREFIX}" \
+        --log-file "${LOG_FILE}" \
+        --pred-out "${PRED_OUT}" \
+        --status "${TRAIN_EXIT}" \
+        || echo "Warning: W&B logging failed, but training already completed."
+else
+    echo "Skipping W&B logging. MODE=${MODE}, WANDB_API_KEY set? $([[ -n "${WANDB_API_KEY:-}" ]] && echo yes || echo no)"
+fi
+
+exit "${TRAIN_EXIT}"
