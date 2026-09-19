@@ -260,14 +260,29 @@ class RoutingInterpretabilityCollector:
         pd.DataFrame(layers).to_csv(self.output_dir/"layer_summary.csv",index=False)
         pd.DataFrame(experts).to_csv(self.output_dir/"expert_usage.csv",index=False)
         if pairs: pd.DataFrame(pairs).to_csv(self.output_dir/"topk_combinations.csv",index=False)
+        # IMPORTANT: do not use pandas/pyarrow Parquet writers here. dump() is
+        # registered with atexit, and PyArrow may try to start worker threads after
+        # Python has already begun interpreter shutdown. Standard-library
+        # gzip+pickle is synchronous and safe in this callback.
         if self.token_chunks:
-            pd.concat(self.token_chunks,ignore_index=True).to_parquet(self.output_dir/"token_sample.parquet",index=False,compression="zstd")
+            token_df = pd.concat(self.token_chunks, ignore_index=True)
+            with gzip.open(self.output_dir/"token_sample.pkl.gz", "wb", compresslevel=3) as f:
+                pickle.dump(token_df, f, protocol=pickle.HIGHEST_PROTOCOL)
         if self.class_chunks:
-            pd.concat(self.class_chunks,ignore_index=True).to_parquet(self.output_dir/"class_token_sample.parquet",index=False,compression="zstd")
+            class_df = pd.concat(self.class_chunks, ignore_index=True)
+            with gzip.open(self.output_dir/"class_token_sample.pkl.gz", "wb", compresslevel=3) as f:
+                pickle.dump(class_df, f, protocol=pickle.HIGHEST_PROTOCOL)
         manifest={
             "run_name":self.run_name,"core_module":self.core_name,"num_moe_blocks":len(self.layers),
             "events_seen":self.event_offset,"particle_sample_mod":self.sample_mod,"class_sample_mod":self.class_sample_mod,
             "feature_names":FEATURE_NAMES,
+            "files":{
+                "layer_summary":"layer_summary.csv",
+                "expert_usage":"expert_usage.csv",
+                "token_sample":"token_sample.pkl.gz",
+                "class_token_sample":"class_token_sample.pkl.gz",
+                "topk_combinations":"topk_combinations.csv",
+            },
             "routing_semantics":{
                 "top1_capacity":"capacity_factor * ceil(tokens / E)",
                 "topk_capacity":"capacity_factor * ceil(tokens * K / E)",
