@@ -18,7 +18,7 @@ def nmi(x,y):
     pxy=tab.values/n; px=pxy.sum(1,keepdims=True); py=pxy.sum(0,keepdims=True)
     nz=pxy>0
     mi=float((pxy[nz]*np.log(pxy[nz]/(px@py)[nz])).sum())
-    hx=entropy_counts(tab.sum(1).values); hy=entropy_counts(tab.sum(0).values)
+    hx=entropy_counts(tab.sum(axis=1).values); hy=entropy_counts(tab.sum(axis=0).values)
     return 0.0 if hx<=0 or hy<=0 else mi/math.sqrt(hx*hy)
 
 def js(p,q):
