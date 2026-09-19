@@ -36,9 +36,51 @@ class RoutingInterpretabilityCollector:
         self.layers={}; self.layer_order=[]; self.current_valid_masks={}
         self.current_context=None; self.event_offset=0; self.handles=[]
         self.token_chunks=[]; self.class_chunks=[]; self.dumped=False
+        # The training framework constructs the model, profiles it with dummy
+        # inputs, and only then loads the requested checkpoint.  Hooks must be
+        # present when the real prediction starts, but profiling forwards must
+        # never enter the collected statistics.  Keep all hooks dormant until
+        # load_state_dict() has completed successfully.
+        self.active=False; self.activation_reason=None
         self.core_name,self.core=self._find_core()
         self._register_hooks()
+        self.load_handle = self.model.register_load_state_dict_post_hook(
+            self._checkpoint_loaded_hook
+        )
         atexit.register(self.dump)
+
+    def _checkpoint_loaded_hook(self, module, incompatible_keys):
+        """Start a fresh collection after checkpoint weights are installed."""
+        self.reset()
+        self.active=True
+        self.activation_reason="checkpoint_loaded"
+        print("="*88)
+        print("MOE INTERPRETABILITY COLLECTION ARMED")
+        print("checkpoint load completed; collector state reset to zero")
+        print("model.training=", bool(module.training))
+        print("="*88)
+
+    def reset(self):
+        """Clear every counter and sampled row without removing the hooks."""
+        self.current_valid_masks.clear()
+        self.current_context=None
+        self.event_offset=0
+        self.token_chunks.clear()
+        self.class_chunks.clear()
+        self.dumped=False
+        for s in self.layers.values():
+            n=s["num_experts"]
+            s.update({
+                "routing_calls":0,"tokens":0,"valid_tokens":0,
+                "requested":[0]*n,"accepted":[0]*n,"dropped":[0]*n,
+                "valid_requested":[0]*n,"valid_accepted":[0]*n,
+                "valid_dropped":[0]*n,
+                "entropy_sum":0.0,"valid_entropy_sum":0.0,
+                "top1_prob_sum":0.0,"valid_top1_prob_sum":0.0,
+                "selected_weight_sum":[0.0]*n,
+                "accepted_weight_sum":[0.0]*n,
+                "pair_counts":defaultdict(int),
+            })
 
     def _find_core(self):
         c=[]
@@ -51,9 +93,10 @@ class RoutingInterpretabilityCollector:
 
     def _register_hooks(self):
         print("="*88)
-        print("REGISTERING MOE INTERPRETABILITY COLLECTOR")
+        print("INSTALLING DORMANT MOE INTERPRETABILITY COLLECTOR")
         print(f"core={self.core_name or '<root>'}")
         print(f"particle sampling ~= 1/{self.sample_mod}; class-token ~= 1/{self.class_sample_mod}")
+        print("collection begins only after checkpoint load completes")
         print("="*88)
         self.handles.append(self.core.register_forward_pre_hook(self._core_pre_hook, with_kwargs=True))
         for name,m in self.model.named_modules():
@@ -81,6 +124,14 @@ class RoutingInterpretabilityCollector:
             raise RuntimeError("No MoE blocks found")
 
     def _core_pre_hook(self,module,args,kwargs):
+        if not self.active:
+            self.current_context=None
+            return
+        if self.model.training:
+            raise RuntimeError(
+                "Interpretability collection requires model.eval(); refusing to "
+                "collect training-mode routing with dropout/router jitter enabled"
+            )
         x=args[0] if args else kwargs.get("x")
         mask=args[2] if len(args)>2 else kwargs.get("mask")
         if x is None or x.ndim!=3:
@@ -116,6 +167,9 @@ class RoutingInterpretabilityCollector:
 
     def _make_block_pre_hook(self,layer_name):
         def hook(module,args,kwargs):
+            if not self.active:
+                self.current_valid_masks.pop(layer_name, None)
+                return
             x=args[0] if len(args)>0 else kwargs.get("x")
             x_cls=kwargs.get("x_cls"); pm=kwargs.get("padding_mask")
             if x_cls is not None:
@@ -149,6 +203,8 @@ class RoutingInterpretabilityCollector:
 
     def _make_router_hook(self,layer_name,block):
         def hook(router_module,inputs,output):
+            if not self.active:
+                return
             with torch.no_grad():
                 logits=output.detach()
                 if logits.ndim!=2:
@@ -227,6 +283,9 @@ class RoutingInterpretabilityCollector:
     def dump(self):
         if self.dumped: return
         self.dumped=True
+        if not self.active:
+            print("WARNING: interpretability collector never observed a completed checkpoint load; no routing outputs written")
+            return
         layers=[]; experts=[]; pairs=[]
         for name in self.layer_order:
             s=self.layers[name]; n=s["num_experts"]
@@ -274,9 +333,33 @@ class RoutingInterpretabilityCollector:
             class_df = pd.concat(self.class_chunks, ignore_index=True)
             with gzip.open(self.output_dir/"class_token_sample.pkl.gz", "wb", compresslevel=3) as f:
                 pickle.dump(class_df, f, protocol=pickle.HIGHEST_PROTOCOL)
+        class_layer_checks=[]
+        for name in self.layer_order:
+            if "cls_blocks" not in name:
+                continue
+            s=self.layers[name]
+            class_layer_checks.append({
+                "layer":name,
+                "events_seen":self.event_offset,
+                "valid_class_tokens":s["valid_tokens"],
+                "matches_events_seen":s["valid_tokens"] == self.event_offset,
+                "routing_calls":s["routing_calls"],
+            })
+        integrity_ok=bool(class_layer_checks) and all(
+            x["matches_events_seen"] for x in class_layer_checks
+        )
+        if not integrity_ok:
+            print("WARNING: class-token counts do not match events_seen; inspect collection_integrity in the manifest")
+
         manifest={
             "run_name":self.run_name,"core_module":self.core_name,"num_moe_blocks":len(self.layers),
             "events_seen":self.event_offset,"particle_sample_mod":self.sample_mod,"class_sample_mod":self.class_sample_mod,
+            "collection_activation":self.activation_reason,
+            "collector_reset_after_checkpoint_load":True,
+            "collection_integrity":{
+                "class_token_counts_match_events_seen":integrity_ok,
+                "class_layers":class_layer_checks,
+            },
             "feature_names":FEATURE_NAMES,
             "files":{
                 "layer_summary":"layer_summary.csv",
