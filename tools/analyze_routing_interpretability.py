@@ -99,7 +99,7 @@ def main():
     args=ap.parse_args()
     root=Path(args.input_dir); out=root/"analysis"; out.mkdir(exist_ok=True)
 
-    tok=add_bins(pd.read_parquet(root/"token_sample.parquet"))
+    tok=add_bins(pd.read_pickle(root/"token_sample.pkl.gz", compression="gzip"))
     tok,label_name=attach_labels(tok,args.predictions)
     assign=explode(tok,True)
     usage=pd.read_csv(root/"expert_usage.csv")
@@ -138,9 +138,9 @@ def main():
     jsdf=pd.DataFrame(jsrows); jsdf.to_csv(out/"expert_feature_js_divergence.csv",index=False)
 
     clsrows=[]
-    cp=root/"class_token_sample.parquet"
+    cp=root/"class_token_sample.pkl.gz"
     if cp.exists():
-        cls,_=attach_labels(pd.read_parquet(cp),args.predictions)
+        cls,_=attach_labels(pd.read_pickle(cp, compression="gzip"),args.predictions)
         if "jet_family" in cls:
             for layer,g in cls.groupby("layer",sort=False):
                 clsrows.append(dict(layer=layer,layer_index=int(g.layer_index.iloc[0]),n_events=len(g),
