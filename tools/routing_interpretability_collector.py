@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import gzip
+import pickle
 
 FEATURE_NAMES = [
     "part_pt_scale_log_norm","part_e_scale_log_norm","part_logptrel_norm",
