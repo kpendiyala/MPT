@@ -30,6 +30,9 @@ if [[ -z "${OUTPUT_PATH:-}" ]]; then
 fi
 
 DATADIR="${DATA_PATH}/JetClassII"
+TRAIN_DIR="${DATADIR}/Pythia/train"
+VAL_DIR="${DATADIR}/Pythia/val"
+TEST_DIR="${DATADIR}/Pythia/test"
 OUTPUT_VOL_DIR="${OUTPUT_PATH}"
 
 echo "args: $@"
@@ -233,18 +236,34 @@ if (( FULL_DATASET == 1 )); then
     add_unlabeled_range weight_files Res34P 0000 1074
     add_unlabeled_range weight_files QCD    0000 0349
 else
-    # Small/subset mode.
-    # Training starts at official training offsets.
-    # Validation starts at official validation offsets.
-    add_labeled_n_from_start train_files Res2P  Res2P  0   "${TRAIN_FILES_PER_GROUP}"
-    add_labeled_n_from_start train_files Res34P Res34P 0   "${TRAIN_FILES_PER_GROUP}"
-    add_labeled_n_from_start train_files QCD    QCD    0   "${TRAIN_FILES_PER_GROUP}"
+    # 10% proportional JetClass-II training subset:
+    #   Res2P:  20 / 200 files
+    #   Res34P: 86 / 860 files
+    #   QCD:    28 / 280 files
 
-    add_unlabeled_n_from_start val_files Res2P  200 "${VAL_FILES_PER_GROUP}"
-    add_unlabeled_n_from_start val_files Res34P 860 "${VAL_FILES_PER_GROUP}"
-    add_unlabeled_n_from_start val_files QCD    280 "${VAL_FILES_PER_GROUP}"
+    for i in $(seq 0 19); do
+        train_files+=("Res2P:${TRAIN_DIR}/Res2P_$(printf "%04d" "${i}").parquet")
+    done
 
-    # For a tiny smoke test, use the available tiny train+val subset for weight calculation if needed.
+    for i in $(seq 0 85); do
+        train_files+=("Res34P:${TRAIN_DIR}/Res34P_$(printf "%04d" "${i}").parquet")
+    done
+
+    for i in $(seq 0 27); do
+        train_files+=("QCD:${TRAIN_DIR}/QCD_$(printf "%04d" "${i}").parquet")
+    done
+
+    # Keep the existing validation set fixed.
+    val_files+=(
+        "${VAL_DIR}/Res2P_0200.parquet"
+        "${VAL_DIR}/Res2P_0201.parquet"
+        "${VAL_DIR}/Res34P_0860.parquet"
+        "${VAL_DIR}/Res34P_0861.parquet"
+        "${VAL_DIR}/QCD_0280.parquet"
+        "${VAL_DIR}/QCD_0281.parquet"
+    )
+
+    # Train + validation files for weight calculation if needed.
     weight_files+=("${val_files[@]}")
     for f in "${train_files[@]}"; do
         weight_files+=("${f#*:}")
