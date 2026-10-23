@@ -1,3 +1,10 @@
+# PyTorch is installed separately (match your CUDA version).
+weaver-core
+numpy
+pandas
 pyarrow
-h5py
-umap-learn
+scikit-learn
+matplotlib
+tensorboard
+# Optional: W&B logging from train_JC2.sh when WANDB_API_KEY is set
+wandb
