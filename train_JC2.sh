@@ -40,8 +40,8 @@ echo "DATADIR=${DATADIR}"
 echo "OUTPUT_VOL_DIR=${OUTPUT_VOL_DIR}"
 
 MODEL_NAME=${1:-}
-if ! [[ "${MODEL_NAME}" =~ ^(ParT|MPT|AuxFreeMPT|PairwiseMPT)$ ]]; then
-    echo "Invalid model ${MODEL_NAME}! Valid options: ParT, MPT, AuxFreeMPT, PairwiseMPT."
+if ! [[ "${MODEL_NAME}" =~ ^(ParT|MPT)$ ]]; then
+    echo "Invalid model ${MODEL_NAME}! Valid options: ParT, MPT."
     exit 1
 fi
 shift
