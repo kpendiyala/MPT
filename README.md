@@ -49,8 +49,6 @@ tools/
   routing_interpretability_collector.py  per-particle routing records
   analyze_routing_interpretability.py    routing NMI vs particle type, kinematics, jet class
   wandb_log_jc2_tensorboard.py           optional: copies TensorBoard metrics to W&B
-jobs/                         Kubernetes job specs used for the paper's experiments
-experiments/                  experiment notes
 ```
 
 ## Setup
@@ -109,7 +107,7 @@ export COMMENT=nodrop-e4-k1           # run name suffix
 
 Useful flags: `--dry-run` prints the resolved file lists and weaver command without training; `--smoke-test` runs a tiny two-epoch job. Any option the script does not recognize is passed straight to weaver.
 
-The paper's protocol: Ranger optimizer, initial learning rate 5×10⁻⁴ with weaver's default `flat+decay` schedule, batch size 512, 10⁶ training samples per epoch, 20 epochs run uninterrupted, bf16. Resuming with `--load-epoch` changes the learning-rate schedule, so restart interrupted runs from scratch when comparing models.
+The paper's protocol: Ranger optimizer, initial learning rate 5×10⁻⁴ with weaver's default `flat+decay` schedule, batch size 512, 10⁶ training samples per epoch, 20 epochs run, bf16. Resuming with `--load-epoch` changes the learning-rate schedule, so restart interrupted runs from scratch when comparing models.
 
 Outputs go to `${OUTPUT_PATH}/training/JetClassII/Pythia/full/<model>/${COMMENT}/` (checkpoints), `${OUTPUT_PATH}/logs/<model>/` and `${OUTPUT_PATH}/tensorboard/`.
 
@@ -140,14 +138,6 @@ python tools/compute_qcd_rejection.py --predictions pred.parquet --output-dir me
 **Compute.** `tools/profile_run_flops.py` reports parameter counts and forward FLOPs for a single jet with 128 particles, measured with `torch.profiler` (fused scaled-dot-product attention is disabled during profiling so its operations are counted).
 
 **Routing analysis.** Running prediction on validation data with `--network-config model/MPT_interpretability_eval.py` (and `INTERP_OUTPUT_DIR` set) records which expert each particle is routed to; `tools/analyze_routing_interpretability.py` then computes layer-wise normalized mutual information between expert choice and particle type, relative *p*<sub>T</sub> and jet class. `model/MPT_routing_eval.py` records expert load and drop rates.
-
-<!--
-Paste-in for README.md after deleting jobs/ and experiments/.
-1. In the "Repository layout" code block, delete these two lines:
-     jobs/                         Kubernetes job specs used for the paper's experiments
-     experiments/                  experiment notes
-2. Replace the whole "## Experiment configurations" section with the text below.
--->
 
 ## Experiment configurations
 
