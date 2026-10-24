@@ -141,21 +141,45 @@ python tools/compute_qcd_rejection.py --predictions pred.parquet --output-dir me
 
 **Routing analysis.** Running prediction on validation data with `--network-config model/MPT_interpretability_eval.py` (and `INTERP_OUTPUT_DIR` set) records which expert each particle is routed to; `tools/analyze_routing_interpretability.py` then computes layer-wise normalized mutual information between expert choice and particle type, relative *p*<sub>T</sub> and jet class. `model/MPT_routing_eval.py` records expert load and drop rates.
 
+<!--
+Paste-in for README.md after deleting jobs/ and experiments/.
+1. In the "Repository layout" code block, delete these two lines:
+     jobs/                         Kubernetes job specs used for the paper's experiments
+     experiments/                  experiment notes
+2. Replace the whole "## Experiment configurations" section with the text below.
+-->
+
 ## Experiment configurations
 
-`jobs/experiments/` holds the Kubernetes jobs used on the [National Research Platform](https://nationalresearchplatform.org/) for each sweep in the paper:
+Every run uses `train_JC2.sh` with the shared protocol under [Training](#training) (30 training files via `--train-files-per-group 10 --val-files-per-group 2`, batch 512, learning rate 5×10⁻⁴, 10⁶ samples per epoch, 6×10⁵ validation samples, `--network-option moe_router_jitter 0.01`). The configurations differ only in the options below. Check out the listed commit to reproduce a run exactly.
 
-| Folder | Sweep |
-| --- | --- |
-| `Dense/` | dense ParT baseline |
-| `MoE/baseline_k1/` | capacity-limited top-1 (*c* = 1.5), *E* = 2, 4, 8 |
-| `MoE/baseline-k1-nodrop/` | no-drop top-1, *E* = 2, 4, 8 |
-| `MoE/topk/` | top-*K*: E4/K2, E8/K2, E8/K4 |
-| `MoE/auxilary/` | auxiliary-loss coefficient sweep at E4/K1 |
-| `MoE/capacity-factor/` | capacity-factor variant |
-| `eval/` | test-set evaluation |
+| Configuration | Model | `moe_num_experts` (*E*) | `moe_top_k` (*K*) | `moe_capacity_factor` (*c*) | `moe_aux_loss_coef` | Commit |
+| --- | --- | --- | --- | --- | --- | --- |
+| Dense ParT | `ParT` | – | – | – | – | `828da51` |
+| Capacity-limited E2 | `MPT` | 2 | 1 | 1.5 | 0.01 | `828da51` |
+| Capacity-limited E4 | `MPT` | 4 | 1 | 1.5 | 0.01 | `828da51` |
+| Capacity-limited E8 | `MPT` | 8 | 1 | 1.5 | 0.01 | `828da51` |
+| No-drop E2 | `MPT` | 2 | 1 | 2 | 0.01 | `8300390` |
+| No-drop E4 | `MPT` | 4 | 1 | 4 | 0.01 | `8300390` |
+| No-drop E8 | `MPT` | 8 | 1 | 8 | 0.01 | `8300390` |
+| Top-K E4/K2 | `MPT` | 4 | 2 | 2 | 0.01 | `8300390` |
+| Top-K E8/K2 | `MPT` | 8 | 2 | 4 | 0.01 | `8300390` |
+| Top-K E8/K4 | `MPT` | 8 | 4 | 2 | 0.01 | `8300390` |
+| Aux-loss α = 0 | `MPT` | 4 | 1 | 4 | 0.0 | `8300390` |
+| Aux-loss α = 0.05 | `MPT` | 4 | 1 | 4 | 0.05 | `8b836f4` |
 
-They mount a shared volume at `/kaushik-moe-vol`, so paths need adapting to run elsewhere.
+The aux-loss α = 0.01 point is the No-drop E4 run. For example, No-drop E4:
+
+```bash
+./train_JC2.sh MPT full \
+  --train-files-per-group 10 --val-files-per-group 2 \
+  --num-epochs 20 --batch-size 512 --start-lr 5e-4 \
+  --samples-per-epoch 1000000 --samples-per-epoch-val 600000 \
+  --network-option moe_num_experts 4 --network-option moe_top_k 1 \
+  --network-option moe_capacity_factor 4 --network-option moe_aux_loss_coef 0.01 \
+  --network-option moe_router_jitter 0.01
+```
+
 
 ## Citation
 
