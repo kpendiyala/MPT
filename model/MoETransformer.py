@@ -375,7 +375,8 @@ class Block(nn.Module):
                  add_bias_kv=False, activation='gelu',
                  scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True,
                  moe_num_experts=4, moe_top_k=1,
-                 moe_capacity_factor=1.25, moe_aux_loss_coef=0.01, moe_router_jitter=0.0):
+                 moe_capacity_factor=1.25, moe_aux_loss_coef=0.01, moe_router_jitter=0.0,
+                 moe_aux_valid_only=False, moe_top1_unit_weight=False):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -405,6 +406,12 @@ class Block(nn.Module):
         self.moe_capacity_factor = moe_capacity_factor
         self.moe_aux_loss_coef = moe_aux_loss_coef
         self.moe_router_jitter = moe_router_jitter
+        # Camera-ready fixes, both off by default so earlier runs are unchanged:
+        # moe_aux_valid_only: balance only real particles (and the class token), not padding
+        # moe_top1_unit_weight: top-1 expert output scaled by p/p.detach() (value 1, router still
+        #   gets gradient) instead of the raw gate probability, matching the renormalized top-K path
+        self.moe_aux_valid_only = moe_aux_valid_only
+        self.moe_top1_unit_weight = moe_top1_unit_weight
         self.router = nn.Linear(embed_dim, moe_num_experts)
         experts = []
         for _ in range(moe_num_experts):
@@ -483,17 +490,21 @@ class Block(nn.Module):
             router_logits = router_logits + self.moe_router_jitter * noise
         gates = torch.softmax(router_logits, dim=-1)
 
-        mean_prob_per_expert = gates.mean(dim=0)
+        aux_gates = gates
+        if self.moe_aux_valid_only and x_cls is None and padding_mask is not None:
+            # tokens are laid out (seq_len, batch) -> flatten the (batch, seq_len) mask the same way
+            aux_gates = gates[~padding_mask.bool().transpose(0, 1).reshape(-1)]
+        mean_prob_per_expert = aux_gates.mean(dim=0)
         # Auxiliary loss computation (uses non-differentiable ops like argmax)
         with torch.no_grad():
             if self.moe_top_k == 1:
-                token_choice = gates.argmax(dim=-1)
+                token_choice = aux_gates.argmax(dim=-1)
                 frac_per_expert = torch.stack([
                     (token_choice == e).float().mean() for e in range(self.moe_num_experts)
                 ])
             else:
-                topk_idx_aux = gates.topk(k=min(self.moe_top_k, self.moe_num_experts), dim=-1).indices
-                assigned = torch.zeros_like(gates)
+                topk_idx_aux = aux_gates.topk(k=min(self.moe_top_k, self.moe_num_experts), dim=-1).indices
+                assigned = torch.zeros_like(aux_gates)
                 assigned.scatter_(1, topk_idx_aux, 1.0)
                 # Normalize so sum_e frac_per_expert ~= 1 like top-1 case
                 frac_per_expert = assigned.mean(dim=0) / float(self.moe_top_k)
@@ -505,6 +516,8 @@ class Block(nn.Module):
             # top-1 routing (Switch-style)
             top1_idx = gates.argmax(dim=-1)
             top1_w = gates.gather(1, top1_idx.unsqueeze(1)).squeeze(1)
+            if self.moe_top1_unit_weight:
+                top1_w = top1_w / top1_w.detach().clamp(min=1e-9)
             capacity = int(self.moe_capacity_factor * math.ceil(tokens.size(0) / max(1, self.moe_num_experts)))
             for e in range(self.moe_num_experts):
                 mask = (top1_idx == e)
@@ -583,6 +596,9 @@ class MoeParticleTransformer(nn.Module):
                  moe_capacity_factor=1.25,
                  moe_aux_loss_coef=0.01,
                  moe_router_jitter=0.0,
+                 moe_apply_aux_loss=False,
+                 moe_aux_valid_only=False,
+                 moe_top1_unit_weight=False,
                  **kwargs
                  ) -> None:
         super().__init__(**kwargs)
@@ -614,6 +630,9 @@ class MoeParticleTransformer(nn.Module):
         self.moe_capacity_factor = moe_capacity_factor
         self.moe_aux_loss_coef = moe_aux_loss_coef
         self.moe_router_jitter = moe_router_jitter
+        # moe_apply_aux_loss: read by model/MPT.py's loss, which adds _moe_aux_loss to the
+        # cross-entropy during training (weaver calls the loss without the model)
+        self.moe_apply_aux_loss = moe_apply_aux_loss
         if not (self.moe_num_experts and self.moe_num_experts > 0):
             raise ValueError('moe_num_experts must be >= 1 for MoE-only MoeParticleTransformer')
         self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
@@ -630,6 +649,8 @@ class MoeParticleTransformer(nn.Module):
                 moe_capacity_factor=self.moe_capacity_factor,
                 moe_aux_loss_coef=self.moe_aux_loss_coef,
                 moe_router_jitter=self.moe_router_jitter,
+                moe_aux_valid_only=moe_aux_valid_only,
+                moe_top1_unit_weight=moe_top1_unit_weight,
             ))
         self.blocks = nn.ModuleList(blocks)
         self.cls_blocks = nn.ModuleList([
@@ -640,6 +661,8 @@ class MoeParticleTransformer(nn.Module):
                 moe_capacity_factor=self.moe_capacity_factor,
                 moe_aux_loss_coef=self.moe_aux_loss_coef,
                 moe_router_jitter=self.moe_router_jitter,
+                moe_aux_valid_only=moe_aux_valid_only,
+                moe_top1_unit_weight=moe_top1_unit_weight,
             ) for _ in range(num_cls_layers)
         ])
         self.norm = nn.LayerNorm(embed_dim)
@@ -696,6 +719,8 @@ class MoeParticleTransformer(nn.Module):
             cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
             for block in self.cls_blocks:
                 cls_tokens = block(x, x_cls=cls_tokens, padding_mask=padding_mask)
+                if self.moe_apply_aux_loss:
+                    self._moe_aux_loss = self._moe_aux_loss + self.moe_aux_loss_coef * block._last_aux_loss
 
             x_cls = self.norm(cls_tokens).squeeze(0)
 

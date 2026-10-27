@@ -17,6 +17,9 @@ class MoeParticleTransformerWrapper(torch.nn.Module):
         return self.mod(features, v=lorentz_vectors, mask=mask)
 
 
+_MODEL_FOR_LOSS = [None]
+
+
 def get_model(data_config, **kwargs):
     
     cfg = dict(
@@ -50,6 +53,8 @@ def get_model(data_config, **kwargs):
     _logger.info('Model config: %s' % str(cfg))
 
     model = MoeParticleTransformerWrapper(**cfg)
+    # weaver calls loss_func(logits, label) without the model, so the loss reaches it here
+    _MODEL_FOR_LOSS[0] = model
     
     model_info = {
         'input_names': list(data_config.input_names),
@@ -70,7 +75,11 @@ def get_loss(data_config, **kwargs):
             ce_loss = self.ce_loss(output, target)
 
             if model is None:
-                return ce_loss
+                model = _MODEL_FOR_LOSS[0]
+                # Only when explicitly enabled and training, so earlier configs keep plain CE
+                if (model is None or not getattr(model.mod, 'moe_apply_aux_loss', False)
+                        or not model.training):
+                    return ce_loss
 
             # Handle DataParallel/DDP wrappers
             if hasattr(model, 'module'):
