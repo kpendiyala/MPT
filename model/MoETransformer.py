@@ -376,7 +376,7 @@ class Block(nn.Module):
                  scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True,
                  moe_num_experts=4, moe_top_k=1,
                  moe_capacity_factor=1.25, moe_aux_loss_coef=0.01, moe_router_jitter=0.0,
-                 moe_aux_valid_only=False, moe_top1_unit_weight=False):
+                 moe_aux_valid_only=False, moe_top1_unit_weight=False, moe_shared_ffn_ratio=0):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -423,6 +423,15 @@ class Block(nn.Module):
                 nn.Linear(self.ffn_dim, embed_dim),
             ))
         self.experts = nn.ModuleList(experts)
+        # moe_shared_ffn_ratio > 0: one always-on shared expert (hidden embed_dim * ratio) added to the
+        # routed output, DeepSeekMoE-style; shrink ffn_ratio to keep active FLOPs matched
+        self.shared_expert = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * moe_shared_ffn_ratio),
+            nn.GELU() if activation == 'gelu' else nn.ReLU(),
+            nn.Dropout(activation_dropout),
+            nn.LayerNorm(embed_dim * moe_shared_ffn_ratio) if scale_fc else nn.Identity(),
+            nn.Linear(embed_dim * moe_shared_ffn_ratio, embed_dim),
+        ) if moe_shared_ffn_ratio > 0 else None
         self.register_buffer('_last_aux_loss', torch.tensor(0.0), persistent=False)
 
         self.c_attn = nn.Parameter(torch.ones(num_heads), requires_grad=True) if scale_heads else None
@@ -557,6 +566,8 @@ class Block(nn.Module):
                     expert_out = expert_out * weights_e.unsqueeze(1)
                     # Multiple experts can contribute to the same token; accumulate
                     output_tokens.index_add_(0, rows, expert_out)
+        if self.shared_expert is not None:
+            output_tokens = output_tokens + self.shared_expert(tokens)
         x = output_tokens.view(seq_len, batch_size, embed_dim)
         x = self.dropout(x)
         if self.w_resid is not None:
@@ -599,6 +610,7 @@ class MoeParticleTransformer(nn.Module):
                  moe_apply_aux_loss=False,
                  moe_aux_valid_only=False,
                  moe_top1_unit_weight=False,
+                 moe_shared_ffn_ratio=0,
                  **kwargs
                  ) -> None:
         super().__init__(**kwargs)
@@ -651,6 +663,7 @@ class MoeParticleTransformer(nn.Module):
                 moe_router_jitter=self.moe_router_jitter,
                 moe_aux_valid_only=moe_aux_valid_only,
                 moe_top1_unit_weight=moe_top1_unit_weight,
+                moe_shared_ffn_ratio=moe_shared_ffn_ratio,
             ))
         self.blocks = nn.ModuleList(blocks)
         self.cls_blocks = nn.ModuleList([
@@ -663,6 +676,7 @@ class MoeParticleTransformer(nn.Module):
                 moe_router_jitter=self.moe_router_jitter,
                 moe_aux_valid_only=moe_aux_valid_only,
                 moe_top1_unit_weight=moe_top1_unit_weight,
+                moe_shared_ffn_ratio=moe_shared_ffn_ratio,
             ) for _ in range(num_cls_layers)
         ])
         self.norm = nn.LayerNorm(embed_dim)
